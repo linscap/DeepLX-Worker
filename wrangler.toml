@@ -1,0 +1,7 @@
+name = "deeplx-worker"
+main = "index.js"
+compatibility_date = "2024-04-05"
+
+[vars]
+# TOKEN = "your_secret_token" # Add your secret token here
+# DL_SESSION = "your_dl_session" # Add your pro dl_session here
