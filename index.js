@@ -341,7 +341,8 @@ router.post('/v2/translate', async (request, env, ctx) => {
     } = body;
 
     const useCache = cache !== undefined ? cache : !isPrivate;
-    const translateText = Array.isArray(text) ? text.join('\n') : text;
+    const translateText = Array.isArray(text) ? text.join('
+') : text;
     const result = await deeplxTranslate('auto', target_lang, translateText, '', useCache, ctx);
 
     if (result.code === 200) {
