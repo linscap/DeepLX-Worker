@@ -4,45 +4,26 @@
  * This is a Cloudflare Worker that proxies translation requests to the DeepL API.
  * It's a JavaScript rewrite of the original Go project, designed to be deployed on the edge.
  *
- * Features:
- * - Robust CORS support for cross-domain requests.
- * - Caching mechanism to reduce API calls and improve response time.
- * - Public/Private mode based on the presence of an auth TOKEN.
- * - Cache control via a request parameter.
- * - Cache hit identification in the response.
+ * This version is a precise, logical replica of the original Go program's core request logic,
+ * ensuring the highest compatibility and success rate.
  *
  * @author [Your Name/Alias]
  * @link https://github.com/OwO-Network/DeepLX
  */
 
-// A lightweight router with built-in preflight (OPTIONS) handling
-import { Router, withContent, withParams } from 'itty-router';
+import { Router } from 'itty-router';
 
-// --- Helper Functions (ported from Go) ---
+// --- Helper Functions (A precise port from the original Go program) ---
 
-/**
- * Returns the number of 'i' characters in the text.
- * @param {string} translateText The text to translate.
- * @returns {number} The count of 'i's.
- */
 function getICount(translateText) {
   return translateText.split('i').length - 1;
 }
 
-/**
- * Generates a random number for the request ID.
- * @returns {number} A random number.
- */
 function getRandomNumber() {
   const rand = Math.floor(Math.random() * 99999) + 100000;
   return rand * 1000;
 }
 
-/**
- * Generates a timestamp for the request based on the 'i' count.
- * @param {number} iCount The number of 'i's in the text.
- * @returns {number} The timestamp.
- */
 function getTimeStamp(iCount) {
   const ts = Date.now();
   if (iCount !== 0) {
@@ -52,13 +33,6 @@ function getTimeStamp(iCount) {
   return ts;
 }
 
-/**
- * Manipulates the request body string based on the request ID.
- * This is a crucial part of mimicking the official client.
- * @param {number} random The random request ID.
- * @param {string} body The JSON string of the request body.
- * @returns {string} The manipulated body string.
- */
 function handlerBodyMethod(random, body) {
   const calc = (random + 5) % 29 === 0 || (random + 3) % 13 === 0;
   if (calc) {
@@ -67,18 +41,8 @@ function handlerBodyMethod(random, body) {
   return body.replace('"method":"', '"method": "');
 }
 
-// --- Core Translation Logic with Caching ---
+// --- Core Translation Logic (Replicated from Go) ---
 
-/**
- * Performs the translation by calling the DeepL API, with caching.
- * @param {string} sourceLang The source language.
- * @param {string} targetLang The target language.
- * @param {string} translateText The text to translate.
- * @param {string} dlSession Optional DeepL Pro session cookie.
- * @param {boolean} useCache Whether to use the cache for this request.
- * @param {ExecutionContext} ctx The execution context for caching.
- * @returns {Promise<object>} The translation result.
- */
 async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession = '', useCache, ctx) {
   if (!translateText) {
     return {
@@ -88,11 +52,9 @@ async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession 
     };
   }
 
-  // Default to English if source language is not specified
   const finalSourceLang = (!sourceLang || sourceLang === 'auto') ? 'EN' : sourceLang.toUpperCase();
   const finalTargetLang = targetLang.toUpperCase();
 
-  // Create a cache key
   const cacheKey = new Request(`https://deeplx.cache/${finalSourceLang}/${finalTargetLang}/${encodeURIComponent(translateText)}`);
   const cache = caches.default;
 
@@ -100,7 +62,7 @@ async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession 
     const cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
       const result = await cachedResponse.json();
-      result.cached = true; // Add cache hit identifier
+      result.cached = true;
       return result;
     }
   }
@@ -131,121 +93,72 @@ async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession 
   postStr = handlerBodyMethod(id, postStr);
 
   const url = 'https://www2.deepl.com/jsonrpc';
+  
+  // ** CRITICAL: Replicating the exact minimal headers from the Go program **
   const headers = {
     'Content-Type': 'application/json',
-    'Accept': '*/*',
-    'x-app-os-name': 'iOS',
-    'x-app-os-version': '16.3.1',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'User-Agent': 'DeepL-iOS/2.9.1 iOS 16.3.1 (iPad14,1)',
-    'x-app-device': 'iPad14,1',
-    'x-app-build': '514288',
-    'x-app-version': '2.9.1',
   };
 
   if (dlSession) {
     headers['Cookie'] = `dl_session=${dlSession}`;
   }
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: headers,
-      body: postStr,
-    });
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: headers,
+    body: postStr,
+  });
 
-    if (response.status === 429) {
-      return {
-        code: 429,
-        message: 'Too many requests, your IP has been blocked by DeepL temporarily.',
-        cached: false
-      };
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return {
-        code: response.status,
-        message: `DeepL API error: ${errorText}`,
-        cached: false
-      };
-    }
-
-    const resultJson = await response.json();
-
-    if (resultJson.error) {
-      return {
-        code: 500,
-        message: `DeepL API returned an error: ${resultJson.error.message}`,
-        cached: false
-      };
-    }
-
-    const texts = resultJson.result?.texts;
-    if (!texts || texts.length === 0) {
-      return {
-        code: 500,
-        message: 'Translation failed, no text returned.',
-        cached: false
-      };
-    }
-
-    const alternatives = texts[0].alternatives?.map(alt => alt.text) || [];
-
-    const finalResult = {
-      code: 200,
-      id: id,
-      data: texts[0].text,
-      alternatives: alternatives,
-      source_lang: resultJson.result.lang,
-      target_lang: finalTargetLang,
-      method: dlSession ? 'Pro' : 'Free',
-      cached: false, // Add cache miss identifier
-    };
-
-    // Cache the successful response
-    if (useCache) {
-      const cacheableResponse = new Response(JSON.stringify(finalResult), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'public, max-age=3600' // Cache for 1 hour
-        }
-      });
-      ctx.waitUntil(cache.put(cacheKey, cacheableResponse));
-    }
-
-    return finalResult;
-
-  } catch (error) {
-    return {
-      code: 500,
-      message: `An unexpected error occurred: ${error.message}`,
-      cached: false
-    };
+  if (response.status === 429) {
+    throw new Error('Too many requests, your IP has been blocked by DeepL temporarily.');
   }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`DeepL API error: ${response.status} ${errorText}`);
+  }
+
+  const resultJson = await response.json();
+
+  if (resultJson.error) {
+    throw new Error(`DeepL API returned an error: ${resultJson.error.message}`);
+  }
+
+  const texts = resultJson.result?.texts;
+  if (!texts || texts.length === 0) {
+    throw new Error('Translation failed, no text returned.');
+  }
+
+  const alternatives = texts[0].alternatives?.map(alt => alt.text) || [];
+
+  const finalResult = {
+    code: 200,
+    id: id,
+    data: texts[0].text,
+    alternatives: alternatives,
+    source_lang: resultJson.result.lang,
+    target_lang: finalTargetLang,
+    method: dlSession ? 'Pro' : 'Free',
+    cached: false,
+  };
+
+  if (useCache) {
+    const cacheableResponse = new Response(JSON.stringify(finalResult), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=3600'
+      }
+    });
+    ctx.waitUntil(cache.put(cacheKey, cacheableResponse));
+  }
+
+  return finalResult;
 }
 
 // --- Router and Middleware ---
 
 const router = Router();
 
-// Middleware to add CORS headers to every response
-const withCORS = (request, env) => {
-    // A new Response must be returned for the preflight request to be handled correctly.
-    if (request.method === 'OPTIONS') {
-        return new Response(null, {
-            headers: {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-                'Access-Control-Max-Age': '86400',
-            },
-        });
-    }
-};
-
-// Middleware for authentication
 const withAuth = (request, env) => {
   if (env.TOKEN) {
     const tokenInQuery = request.query.token;
@@ -262,7 +175,7 @@ const withAuth = (request, env) => {
     if (tokenInQuery !== env.TOKEN && tokenInHeader !== env.TOKEN) {
       return new Response(
         JSON.stringify({ code: 401, message: 'Invalid access token' }),
-        { status: 401, headers: { 'Content-Type': 'application/json' } }
+        { status: 401 }
       );
     }
   }
@@ -270,8 +183,7 @@ const withAuth = (request, env) => {
 
 // --- API Endpoints ---
 
-// Use withCORS middleware for all routes to handle preflight requests
-router.all('*', withCORS);
+router.options('*', () => new Response(null, { status: 204 }));
 
 router.get('/', () => {
   return new Response(
@@ -279,27 +191,23 @@ router.get('/', () => {
       code: 200,
       message: 'DeepLX-Worker: A Cloudflare Worker implementation of DeepLX.',
       repository: 'https://github.com/OwO-Network/DeepLX',
-    }), {
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    }
+    })
   );
 });
 
 const handleTranslateRequest = async (request, env, ctx) => {
     const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
-    const { text, source_lang, target_lang, cache } = await request.json();
+    let body;
+    try {
+        body = await request.json();
+    } catch (e) {
+        return new Response(JSON.stringify({ code: 400, message: 'Invalid JSON in request body' }), { status: 400 });
+    }
 
+    const { text, source_lang, target_lang, cache } = body;
     const useCache = cache !== undefined ? cache : !isPrivate;
-
     const result = await deeplxTranslate(source_lang, target_lang, text, '', useCache, ctx);
-    return new Response(JSON.stringify(result), {
-      status: result.code,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    return new Response(JSON.stringify(result), { status: result.code });
 };
 
 router.post('/translate', withAuth, handleTranslateRequest);
@@ -307,84 +215,79 @@ router.post('/translate', withAuth, handleTranslateRequest);
 router.post('/v1/translate', withAuth, async (request, env, ctx) => {
     const dlSession = env.DL_SESSION || '';
     if (!dlSession) {
-        return new Response(JSON.stringify({
-        code: 401,
-        message: "DL_SESSION is not configured in worker environment."
-        }), {
-        status: 401
-        });
+        return new Response(JSON.stringify({ code: 401, message: "DL_SESSION is not configured in worker environment." }), { status: 401 });
+    }
+    
+    let body;
+    try {
+        body = await request.json();
+    } catch (e) {
+        return new Response(JSON.stringify({ code: 400, message: 'Invalid JSON in request body' }), { status: 400 });
     }
 
-    const { text, source_lang, target_lang, cache } = await request.json();
-
+    const { text, source_lang, target_lang, cache } = body;
     const useCache = cache !== undefined ? cache : false;
-
     const result = await deeplxTranslate(source_lang, target_lang, text, dlSession, useCache, ctx);
-    return new Response(JSON.stringify(result), {
-        status: result.code,
-        headers: {
-        'Content-Type': 'application/json'
-        }
-    });
+    return new Response(JSON.stringify(result), { status: result.code });
 });
 
 router.post('/v2/translate', withAuth, async (request, env, ctx) => {
     const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
-    const { text, target_lang, cache } = await request.json();
+    let body;
+    try {
+        body = await request.json();
+    } catch (e) {
+        return new Response(JSON.stringify({ code: 400, message: 'Invalid JSON in request body' }), { status: 400 });
+    }
 
+    const { text, target_lang, cache } = body;
     const useCache = cache !== undefined ? cache : !isPrivate;
     const translateText = Array.isArray(text) ? text.join('\n') : text;
     const result = await deeplxTranslate('auto', target_lang, translateText, '', useCache, ctx);
 
     if (result.code === 200) {
         const officialResponse = {
-        translations: [{
-            detected_source_language: result.source_lang,
-            text: result.data,
-        }, ],
-        cached: result.cached,
+            translations: [{
+                detected_source_language: result.source_lang,
+                text: result.data,
+            }, ],
+            cached: result.cached,
         };
-        return new Response(JSON.stringify(officialResponse), {
-        status: 200,
-        headers: {
-            'Content-Type': 'application/json'
-        }
-        });
+        return new Response(JSON.stringify(officialResponse));
     } else {
-        return new Response(JSON.stringify(result), {
-        status: result.code,
-        headers: {
-            'Content-Type': 'application/json'
-        }
-        });
+        return new Response(JSON.stringify(result), { status: result.code });
     }
 });
 
-
-// Catch-all for 404s
-router.all('*', () => new Response(JSON.stringify({
-  code: 404,
-  message: 'Not Found'
-}), {
-  status: 404
-}));
+router.all('*', () => new Response(JSON.stringify({ code: 404, message: 'Not Found' }), { status: 404 }));
 
 // --- Worker Entrypoint ---
 
-export default {
-  async fetch(request, env, ctx) {
-    const response = await router.handle(request, env, ctx);
-
-    // Add CORS headers to the response after it's handled.
+const corsify = (response) => {
     const newHeaders = new Headers(response.headers);
     newHeaders.set('Access-Control-Allow-Origin', '*');
     newHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     newHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    
     return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
         headers: newHeaders,
     });
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      const response = await router.handle(request, env, ctx);
+      return corsify(response);
+    } catch (err) {
+      console.error(err);
+      const errorResponse = new Response(JSON.stringify({
+        code: 500,
+        message: 'Worker threw an exception',
+        error: err.message,
+      }), { status: 500 });
+      return corsify(errorResponse);
+    }
   },
 };
