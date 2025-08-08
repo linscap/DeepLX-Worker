@@ -5,6 +5,7 @@
  * It's a JavaScript rewrite of the original Go project, designed to be deployed on the edge.
  *
  * Features:
+ * - Robust CORS support for cross-domain requests.
  * - Caching mechanism to reduce API calls and improve response time.
  * - Public/Private mode based on the presence of an auth TOKEN.
  * - Cache control via a request parameter.
@@ -14,8 +15,8 @@
  * @link https://github.com/OwO-Network/DeepLX
  */
 
-// A lightweight router
-import { Router } from 'itty-router';
+// A lightweight router with built-in preflight (OPTIONS) handling
+import { Router, preflight } from 'itty-router';
 
 // --- Helper Functions (ported from Go) ---
 
@@ -227,7 +228,8 @@ async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession 
 
 // --- Router and Middleware ---
 
-const router = Router();
+// Initialize router with preflight handling
+const router = Router({ preflight });
 
 // Middleware for authentication
 const authMiddleware = (request, env) => {
@@ -244,16 +246,10 @@ const authMiddleware = (request, env) => {
   }
 
   if (tokenInQuery !== env.TOKEN && tokenInHeader !== env.TOKEN) {
+    // Return a 401 response if auth fails
     return new Response(
-      JSON.stringify({
-        code: 401,
-        message: 'Invalid access token'
-      }), {
-        status: 401,
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      }
+      JSON.stringify({ code: 401, message: 'Invalid access token' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } }
     );
   }
 };
@@ -341,8 +337,7 @@ router.post('/v2/translate', async (request, env, ctx) => {
     } = body;
 
     const useCache = cache !== undefined ? cache : !isPrivate;
-    const translateText = Array.isArray(text) ? text.join('
-') : text;
+    const translateText = Array.isArray(text) ? text.join('\n') : text;
     const result = await deeplxTranslate('auto', target_lang, translateText, '', useCache, ctx);
 
     if (result.code === 200) {
@@ -384,15 +379,27 @@ export default {
   async fetch(request, env, ctx) {
     const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
 
-    // Only apply auth middleware for private mode on relevant paths
-    const url = new URL(request.url);
-    if (isPrivate && url.pathname.startsWith('/translate') || url.pathname.startsWith('/v1/translate') || url.pathname.startsWith('/v2/translate')) {
-        const authResult = authMiddleware(request, env);
-        if (authResult) { // If auth fails, authMiddleware returns a Response
-            return authResult;
-        }
+    // Apply auth middleware for private mode
+    if (isPrivate) {
+      const url = new URL(request.url);
+      if (url.pathname.startsWith('/translate') || url.pathname.startsWith('/v1/translate') || url.pathname.startsWith('/v2/translate')) {
+          const authResult = authMiddleware(request, env);
+          if (authResult) { // If auth fails, authMiddleware returns a Response
+              // Add CORS headers to the auth error response and return
+              authResult.headers.set('Access-Control-Allow-Origin', '*');
+              return authResult;
+          }
+      }
     }
     
-    return router.handle(request, env, ctx);
+    // Handle the request with the router
+    const response = await router.handle(request, env, ctx);
+
+    // Add CORS headers to all responses
+    response.headers.set('Access-Control-Allow-Origin', '*');
+    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    return response;
   },
 };
