@@ -16,7 +16,7 @@
  */
 
 // A lightweight router with built-in preflight (OPTIONS) handling
-import { Router, preflight } from 'itty-router';
+import { Router, withContent, withParams } from 'itty-router';
 
 // --- Helper Functions (ported from Go) ---
 
@@ -228,33 +228,50 @@ async function deeplxTranslate(sourceLang, targetLang, translateText, dlSession 
 
 // --- Router and Middleware ---
 
-// Initialize router with preflight handling
-const router = Router({ preflight });
+const router = Router();
+
+// Middleware to add CORS headers to every response
+const withCORS = (request, env) => {
+    // A new Response must be returned for the preflight request to be handled correctly.
+    if (request.method === 'OPTIONS') {
+        return new Response(null, {
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                'Access-Control-Max-Age': '86400',
+            },
+        });
+    }
+};
 
 // Middleware for authentication
-const authMiddleware = (request, env) => {
-  // This middleware only runs if env.TOKEN is set.
-  const tokenInQuery = request.query.token;
-  const authHeader = request.headers.get('Authorization');
-  let tokenInHeader = '';
+const withAuth = (request, env) => {
+  if (env.TOKEN) {
+    const tokenInQuery = request.query.token;
+    const authHeader = request.headers.get('Authorization');
+    let tokenInHeader = '';
 
-  if (authHeader) {
-    const parts = authHeader.split(' ');
-    if (parts.length === 2 && (parts[0] === 'Bearer' || parts[0] === 'DeepL-Auth-Key')) {
-      tokenInHeader = parts[1];
+    if (authHeader) {
+      const parts = authHeader.split(' ');
+      if (parts.length === 2 && (parts[0] === 'Bearer' || parts[0] === 'DeepL-Auth-Key')) {
+        tokenInHeader = parts[1];
+      }
     }
-  }
 
-  if (tokenInQuery !== env.TOKEN && tokenInHeader !== env.TOKEN) {
-    // Return a 401 response if auth fails
-    return new Response(
-      JSON.stringify({ code: 401, message: 'Invalid access token' }),
-      { status: 401, headers: { 'Content-Type': 'application/json' } }
-    );
+    if (tokenInQuery !== env.TOKEN && tokenInHeader !== env.TOKEN) {
+      return new Response(
+        JSON.stringify({ code: 401, message: 'Invalid access token' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
   }
 };
 
 // --- API Endpoints ---
+
+// Use withCORS middleware for all routes to handle preflight requests
+router.all('*', withCORS);
 
 router.get('/', () => {
   return new Response(
@@ -272,17 +289,8 @@ router.get('/', () => {
 
 const handleTranslateRequest = async (request, env, ctx) => {
     const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
-    const body = await request.json();
-    const {
-      text,
-      source_lang,
-      target_lang,
-      cache
-    } = body;
+    const { text, source_lang, target_lang, cache } = await request.json();
 
-    // Determine if cache should be used.
-    // User's `cache` param takes precedence.
-    // Otherwise, default is ON for public mode, OFF for private mode.
     const useCache = cache !== undefined ? cache : !isPrivate;
 
     const result = await deeplxTranslate(source_lang, target_lang, text, '', useCache, ctx);
@@ -294,9 +302,9 @@ const handleTranslateRequest = async (request, env, ctx) => {
     });
 };
 
-router.post('/translate', handleTranslateRequest);
+router.post('/translate', withAuth, handleTranslateRequest);
 
-router.post('/v1/translate', async (request, env, ctx) => {
+router.post('/v1/translate', withAuth, async (request, env, ctx) => {
     const dlSession = env.DL_SESSION || '';
     if (!dlSession) {
         return new Response(JSON.stringify({
@@ -307,15 +315,8 @@ router.post('/v1/translate', async (request, env, ctx) => {
         });
     }
 
-    const body = await request.json();
-    const {
-        text,
-        source_lang,
-        target_lang,
-        cache
-    } = body;
+    const { text, source_lang, target_lang, cache } = await request.json();
 
-    // For /v1, we default to no cache, but allow user override
     const useCache = cache !== undefined ? cache : false;
 
     const result = await deeplxTranslate(source_lang, target_lang, text, dlSession, useCache, ctx);
@@ -327,14 +328,9 @@ router.post('/v1/translate', async (request, env, ctx) => {
     });
 });
 
-router.post('/v2/translate', async (request, env, ctx) => {
+router.post('/v2/translate', withAuth, async (request, env, ctx) => {
     const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
-    const body = await request.json();
-    const {
-        text,
-        target_lang,
-        cache
-    } = body;
+    const { text, target_lang, cache } = await request.json();
 
     const useCache = cache !== undefined ? cache : !isPrivate;
     const translateText = Array.isArray(text) ? text.join('\n') : text;
@@ -346,7 +342,7 @@ router.post('/v2/translate', async (request, env, ctx) => {
             detected_source_language: result.source_lang,
             text: result.data,
         }, ],
-        cached: result.cached, // Pass through the cache status
+        cached: result.cached,
         };
         return new Response(JSON.stringify(officialResponse), {
         status: 200,
@@ -377,29 +373,18 @@ router.all('*', () => new Response(JSON.stringify({
 
 export default {
   async fetch(request, env, ctx) {
-    const isPrivate = env.TOKEN !== undefined && env.TOKEN !== '';
-
-    // Apply auth middleware for private mode
-    if (isPrivate) {
-      const url = new URL(request.url);
-      if (url.pathname.startsWith('/translate') || url.pathname.startsWith('/v1/translate') || url.pathname.startsWith('/v2/translate')) {
-          const authResult = authMiddleware(request, env);
-          if (authResult) { // If auth fails, authMiddleware returns a Response
-              // Add CORS headers to the auth error response and return
-              authResult.headers.set('Access-Control-Allow-Origin', '*');
-              return authResult;
-          }
-      }
-    }
-    
-    // Handle the request with the router
     const response = await router.handle(request, env, ctx);
 
-    // Add CORS headers to all responses
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-    return response;
+    // Add CORS headers to the response after it's handled.
+    const newHeaders = new Headers(response.headers);
+    newHeaders.set('Access-Control-Allow-Origin', '*');
+    newHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    newHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+    });
   },
 };
